@@ -1,0 +1,2 @@
+Frontend requests > Controller receives > Controller calls service > Returns API response
+Valides input and formats response

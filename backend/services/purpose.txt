@@ -1,0 +1,1 @@
+Holds main logic behind calculations and calls. GIS calculations, risk scoring, environmental overlap analysis, etc.
