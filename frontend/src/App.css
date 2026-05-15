@@ -1,3 +1,5 @@
+/* --- GLOBAL STYLES --- */
+/* Variables and defaults applied to the whole page */
 :root {
   font-family: 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   color: #0f172a;
@@ -23,6 +25,8 @@ body {
   padding: 2rem 1rem 3rem;
 }
 
+/* --- HERO SECTION --- */
+/* The big blue banner at the top of the page */
 .hero-section {
   background: linear-gradient(120deg, #0b3b75, #1558b0);
   color: #ffffff;
@@ -55,6 +59,8 @@ body {
   color: #dce9ff;
 }
 
+/* --- CARDS --- */
+/* A reusable white box with a soft shadow. We apply this to many sections to make them pop. */
 .card {
   background-color: #ffffff;
   border: 1px solid #dbe4f0;
@@ -63,6 +69,8 @@ body {
   padding: 1.2rem;
 }
 
+/* --- SEARCH AREA --- */
+/* Styles for the input box and the submit button */
 .search-section {
   margin-top: 1.25rem;
 }
@@ -111,10 +119,25 @@ body {
   box-shadow: 0 8px 20px rgba(13, 79, 184, 0.3);
 }
 
+.search-row button:disabled {
+  background: #cbd5e1;
+  color: #64748b;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 .search-message {
   margin: 0.8rem 0 0;
   color: #475569;
   font-size: 0.92rem;
+}
+
+.loading-message {
+  margin: 0.8rem 0 0;
+  color: #0d4fb8;
+  font-weight: 600;
+  font-size: 0.95rem;
 }
 
 .dashboard-grid {
@@ -174,6 +197,8 @@ body {
   font-weight: 700;
 }
 
+/* --- RISK STATUS COLORS --- */
+/* Different colors automatically applied based on the risk 'status' property in the data */
 .risk-good {
   background-color: #ecfdf5;
   border-color: #86efac;
@@ -192,6 +217,8 @@ body {
   color: #991b1b;
 }
 
+/* --- MAP PLACEHOLDER --- */
+/* A dotted box with a striped background to show where a map will go later */
 .map-placeholder {
   min-height: 220px;
   border: 2px dashed #93c5fd;
@@ -249,6 +276,8 @@ body {
   line-height: 1.5;
 }
 
+/* --- RESPONSIVE MEDIA QUERY --- */
+/* When the screen is wider than 900px (like a laptop), split the grid items to take up half the space (span 6 instead of 12) */
 @media (min-width: 900px) {
   .property-overview,
   .risk-section,

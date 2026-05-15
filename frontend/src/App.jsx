@@ -2,16 +2,23 @@ import { useState } from 'react';
 import './App.css';
 
 function App() {
-  // Tracks what user types in the search field.
+  // --- STATE VARIABLES ---
+  // useState tells React to track these variables and redraw the screen if they change.
+  // 'searchInput' stores what the user is typing right now.
   const [searchInput, setSearchInput] = useState('');
 
-  // Holds validation/help messages for the user.
+  // 'message' holds helpful alerts like "Please enter an address".
   const [message, setMessage] = useState('');
 
-  // Stores the selected property result after user clicks Analyze Property.
+  // 'propertyResult' holds the data we get back after searching. null means no search yet.
   const [propertyResult, setPropertyResult] = useState(null);
 
-  // Fake property data we can later replace with a real API response from AWS.
+  // 'isLoading' tells us if we are currently waiting for data to return.
+  const [isLoading, setIsLoading] = useState(false);
+
+  // --- FAKE SAMPLE DATA ---
+  // We use this fake data to build the UI before the backend is ready.
+  // Later, we will delete this and fetch real data from AWS.
   const samplePropertyData = {
     id: 'PARCEL-4821-AZ',
     address: '1458 Green Valley Rd, Cedar Hill, TX',
@@ -57,8 +64,11 @@ function App() {
     ],
   };
 
-  // Handles click behavior for the Analyze Property button.
-  const handleAnalyzeProperty = () => {
+  // --- FORM SUBMISSION HANDLER ---
+  // This runs when the user clicks "Analyze Property" or hits the Enter key.
+  const handleAnalyzeProperty = (event) => {
+    // Prevents the browser's default behavior of reloading the entire page when a form is submitted.
+    event.preventDefault();
     const trimmedInput = searchInput.trim();
 
     if (!trimmedInput) {
@@ -67,9 +77,21 @@ function App() {
       return;
     }
 
-    // For now we always return sample data to simulate a successful search result.
-    setPropertyResult({ ...samplePropertyData, query: trimmedInput });
-    setMessage(`Showing sample analysis results for: "${trimmedInput}"`);
+    // Clear previous results and show loading state
+    setPropertyResult(null);
+    setMessage('');
+    setIsLoading(true);
+
+    // --- FAKE API DELAY ---
+    // setTimeout simulates the time it takes to send a request over the internet.
+    // FUTURE AWS INTEGRATION POINT:
+    // Here we will eventually use `fetch('https://api-gateway-url...')` to call an AWS Lambda.
+    setTimeout(() => {
+      // For now we always return sample data to simulate a successful search result.
+      setPropertyResult({ ...samplePropertyData, query: trimmedInput });
+      setMessage(`Showing sample analysis results for: "${trimmedInput}"`);
+      setIsLoading(false);
+    }, 1500); // 1.5 seconds simulation
   };
 
   return (
@@ -89,7 +111,7 @@ function App() {
         <label htmlFor="propertySearch" className="search-label">
           Property Address or Parcel ID
         </label>
-        <div className="search-row">
+        <form className="search-row" onSubmit={handleAnalyzeProperty}>
           <input
             id="propertySearch"
             type="text"
@@ -97,12 +119,15 @@ function App() {
             value={searchInput}
             onChange={(event) => setSearchInput(event.target.value)}
           />
-          <button onClick={handleAnalyzeProperty}>Analyze Property</button>
-        </div>
+          <button type="submit" disabled={isLoading}>Analyze Property</button>
+        </form>
         {message && <p className="search-message">{message}</p>}
+        {isLoading && <p className="loading-message">Fetching sample AWS-ready data...</p>}
       </section>
 
-      {/* Results Section - displayed only after user runs an analysis */}
+      {/* --- CONDITIONAL RENDERING --- */}
+      {/* The && means: "If propertyResult has data, then draw the main dashboard below." */}
+      {/* If propertyResult is null (before searching), nothing below is drawn. */}
       {propertyResult && (
         <main className="dashboard-grid">
           <section className="card property-overview">
