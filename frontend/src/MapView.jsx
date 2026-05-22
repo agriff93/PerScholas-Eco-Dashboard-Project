@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN;
 const API_BASE     = 'http://localhost:5000';
+
+// Check if the token is valid (not undefined, empty, or a generic placeholder)
+const hasValidToken = MAPBOX_TOKEN && MAPBOX_TOKEN.trim() !== '' && !MAPBOX_TOKEN.includes('placeholder') && !MAPBOX_TOKEN.includes('YOUR_MAPBOX_TOKEN');
 const PARCEL_MIN_ZOOM = 13;
 
 const COMPLIANCE_REGIONS = {
@@ -37,7 +40,7 @@ export default function MapView({ propertyQuery }) {
   const mapRef          = useRef(null);
   const fetchTimerRef   = useRef(null);
 
-  const [status, setStatus]               = useState('Initializing map…');
+  const [status, setStatus]               = useState(hasValidToken ? 'Initializing map…' : 'Mapbox token missing');
   const [parcelCount, setParcelCount]     = useState(0);
   const [showZoomHint, setShowZoomHint]   = useState(false);
   const [selectedParcel, setSelectedParcel] = useState(null);
@@ -46,6 +49,10 @@ export default function MapView({ propertyQuery }) {
   const [complianceData, setComplianceData] = useState(COMPLIANCE_REGIONS);
 
   useEffect(() => {
+    if (!hasValidToken) {
+      setStatus('Mapbox token missing');
+      return;
+    }
     if (mapRef.current || !window.mapboxgl) return;
 
     window.mapboxgl.accessToken = MAPBOX_TOKEN;
@@ -165,19 +172,65 @@ export default function MapView({ propertyQuery }) {
   }, []);
 
   useEffect(() => {
-    if (!propertyQuery || !mapRef.current) return;
-    // Basic geocode attempt via Mapbox geocoding API
+    if (!propertyQuery) return;
+
+    /*
+     * 📘 STUDENT EDUCATION NOTE — WHAT IS GEOCODING?
+     * Geocoding is the process of converting human-readable address descriptions 
+     * (like "1458 Green Valley Rd") into geographic coordinates (longitude and latitude).
+     * 
+     * 🗺️ WHY COORDINATES ARE NEEDED:
+     * Maps use geographic coordinates to know exactly where to render markers or fly the camera. 
+     * Additionally, in professional environmental setups, coordinates are required by spatial 
+     * databases (like PostgreSQL with PostGIS extensions) to check if a parcel overlaps with any 
+     * ecologically restricted zones (wetlands, flood hazards, or protected habitats).
+     * 
+     * 🔑 WHAT VITE_MAPBOX_TOKEN DOES:
+     * Mapbox is a third-party mapping platform. It handles rendering vector tiles and geocoding addresses.
+     * The Mapbox API is protected, so you must pass a valid token ('VITE_MAPBOX_TOKEN') to authenticate 
+     * your frontend application. This is read securely from your local environment configuration (.env).
+     * 
+     * 🚀 FUTURE AWS INTEGRATION OPPORTUNITY:
+     * In a complete production setup, the frontend would not fetch directly from Mapbox. Instead, 
+     * the search request would be sent to an AWS API Gateway endpoint, which triggers an AWS Lambda 
+     * serverless function. This Lambda function would call the spatial database (RDS PostgreSQL/PostGIS 
+     * or DynamoDB) to run environmental risk check logic and return both coordinates and real risk statistics.
+     */
+
+    if (!hasValidToken) {
+      setStatus('Mapbox token missing');
+      return;
+    }
+
+    if (!mapRef.current) return;
+
+    setStatus('Searching address...');
+
+    // Convert search address to URL-safe characters for the Mapbox API request
     const encoded = encodeURIComponent(`${propertyQuery}, North Carolina`);
+    
     fetch(`https://api.mapbox.com/geocoding/v5/mapbox.places/${encoded}.json?access_token=${MAPBOX_TOKEN}&country=US&limit=1`)
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) {
+          throw new Error(`Geocoding request failed with status: ${r.status}`);
+        }
+        return r.json();
+      })
       .then(data => {
         const feature = data.features?.[0];
         if (feature) {
+          // Found matching coordinates, move map camera there
           mapRef.current.flyTo({ center: feature.center, zoom: 15, duration: 1800 });
-          setStatus(`Flew to: ${feature.place_name}`);
+          setStatus(`Found: ${feature.place_name}`);
+        } else {
+          // Request succeeded, but Mapbox could not find any matches for the query
+          setStatus('No address found');
         }
       })
-      .catch(() => {});
+      .catch(err => {
+        console.error('[MapView] geocoding error:', err);
+        setStatus('Geocoding failed');
+      });
   }, [propertyQuery]);
 
   const handleFilter = (sev) => {
@@ -190,6 +243,40 @@ export default function MapView({ propertyQuery }) {
     setComplianceData(filtered);
     mapRef.current.getSource('compliance')?.setData(filtered);
   };
+
+  if (!hasValidToken) {
+    return (
+      <div className="mapview-wrapper">
+        {/* Filter bar (disabled and styled appropriately for offline state) */}
+        <div className="mapview-toolbar">
+          <span className="mapview-toolbar-label">Compliance Filter:</span>
+          {['all','critical','high','medium'].map(sev => (
+            <button
+              key={sev}
+              className={`mapview-filter-btn sev-${sev}`}
+              disabled
+              style={{ cursor: 'not-allowed', opacity: 0.5 }}
+            >
+              {sev.charAt(0).toUpperCase() + sev.slice(1)}
+            </button>
+          ))}
+          <span className="mapview-status">{status}</span>
+        </div>
+
+        {/* Custom premium placeholder banner for missing Mapbox access token */}
+        <div className="mapview-placeholder">
+          <div className="mapview-placeholder-icon">🗺️</div>
+          <div className="mapview-placeholder-title">Interactive Map Offline</div>
+          <p className="mapview-placeholder-text">
+            To enable the real-time ecological compliance map and property geocoding, please configure a valid Mapbox public access token.
+          </p>
+          <div className="mapview-placeholder-code">
+            VITE_MAPBOX_TOKEN=your_mapbox_token_here
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mapview-wrapper">
