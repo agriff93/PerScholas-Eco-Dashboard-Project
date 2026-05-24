@@ -1,0 +1,6 @@
+Frontend will contain anything that concerns what is facing the consumer, such as:
+- Dashboard
+- Maps
+- Overlays
+- Forms
+- UI as a whole
