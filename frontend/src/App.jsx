@@ -1,435 +1,277 @@
 import { useState } from 'react';
 import './App.css';
 
-function App() {
-  // --- STATE VARIABLES ---
-  // useState tells React to track these variables and redraw the screen if they change.
-  // 'searchInput' stores what the user is typing right now.
-  const [searchInput, setSearchInput] = useState('');
+// Point this at your API. Locally it's the Express server on port 3001.
+// For the AWS deploy, set VITE_API_URL in a .env file (e.g. your Beanstalk URL).
+const API = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
-  // 'message' holds helpful alerts like "Please enter an address".
-  const [message, setMessage] = useState('');
+// --- helpers ---------------------------------------------------------------
 
-  // 'propertyResult' holds the data we get back after searching. null means no search yet.
-  const [propertyResult, setPropertyResult] = useState(null);
+// "NON_COMPLIANT" -> "Non Compliant"
+function prettyStatus(s) {
+  if (!s) return 'Unknown';
+  return s.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
-  // 'isLoading' tells us if we are currently waiting for data to return.
-  const [isLoading, setIsLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('overview');
+// Show a clean dash for null / empty / shapefile junk values.
+function val(v) {
+  return v === null || v === undefined || v === '' || v === 'nan' || v === 'NaT' ? '—' : v;
+}
 
-  // --- FAKE SAMPLE DATA ---
-  // We use this fake data to build the UI before the backend is ready.
-  // Later, we will delete this and fetch real data from AWS.
-  const samplePropertyData = {
-    id: 'PARCEL-4821-AZ',
-    address: '1458 Green Valley Rd, Cedar Hill, TX',
-    updatedAt: 'May 13, 2026',
-    riskSummary: [
-      { label: 'Flood Zone', level: 'Moderate', status: 'warning' },
-      { label: 'Wetlands', level: 'Low', status: 'good' },
-      { label: 'Protected Habitat', level: 'High', status: 'danger' },
-      { label: 'Endangered Species', level: 'Moderate', status: 'warning' },
-    ],
-    complianceStatus: 'Conditional Approval',
-    recommendations: [
-      'Schedule an ecological impact review before site clearing.',
-      'Add stormwater runoff controls to lower flood-related risk.',
-      'Request a protected habitat buffer assessment from environmental consultants.',
-      'Maintain monitoring records for local compliance reporting.',
-    ],
-    awsPlan: [
-      {
-        service: 'Amazon API Gateway',
-        purpose: 'Secure endpoint for frontend property analysis requests.',
-      },
-      {
-        service: 'AWS Lambda',
-        purpose: 'Serverless function to process risk logic and combine data sources.',
-      },
-      {
-        service: 'Amazon DynamoDB / Amazon RDS (PostGIS)',
-        purpose: 'Store parcel records, risk results, and geospatial compliance metadata.',
-      },
-      {
-        service: 'Amazon S3',
-        purpose: 'Store map layers, uploaded reports, and compliance documents.',
-      },
-      {
-        service: 'Amazon CloudWatch',
-        purpose: 'Track logs, metrics, and alerting for the analysis workflow.',
-      },
-      {
-        service: 'Amazon Location Service / Mapbox (optional)',
-        purpose: 'Interactive map rendering and geocoding in future releases.',
-      },
-    ],
-  };
+// Map a FEMA flood zone to a risk level + status color for the cards.
+function floodInfo(inFlood, zone) {
+  if (!inFlood || !zone) return { level: 'Not in mapped flood zone', status: 'good' };
+  const z = String(zone).toUpperCase();
+  if (z === 'VE' || z === 'V') return { level: `High — ${zone}`, status: 'danger' };
+  if (z === 'AE' || z === 'A') return { level: `High — ${zone}`, status: 'danger' };
+  if (z === 'AO' || z === 'AH') return { level: `Moderate — ${zone}`, status: 'warning' };
+  if (z.includes('0.2')) return { level: 'Moderate — 500-yr', status: 'warning' };
+  if (z === 'X') return { level: 'Minimal — Zone X', status: 'good' };
+  return { level: zone, status: 'warning' };
+}
 
-  // --- FORM SUBMISSION HANDLER ---
-  // This runs when the user clicks "Analyze Property" or hits the Enter key.
-  const handleAnalyzeProperty = (event) => {
-    // Prevents the browser's default behavior of reloading the entire page when a form is submitted.
-    event.preventDefault();
-    const trimmedInput = searchInput.trim();
+// Build recommendations from the parcel's actual risk flags.
+function buildRecommendations(p) {
+  const recs = [];
+  const z = String(p.fema_zone || '').toUpperCase();
+  if (p.in_flood_zone && z && z !== 'X' && !z.includes('0.2'))
+    recs.push('Verify base flood elevation and add stormwater runoff controls before site work.');
+  if (p.in_habitat)
+    recs.push('Request a protected-habitat buffer assessment from an environmental consultant.');
+  if (p.in_wetland)
+    recs.push('Obtain a wetland delineation and review Section 404 permitting requirements.');
+  if (p.compliance_status === 'NON_COMPLIANT')
+    recs.push('Schedule a full environmental compliance review before site clearing or permitting.');
+  if (recs.length === 0)
+    recs.push('No major environmental constraints flagged — standard due diligence applies.');
+  recs.push('Maintain monitoring and documentation records for local compliance reporting.');
+  return recs;
+}
 
-    if (!trimmedInput) {
-      setPropertyResult(null);
-      setMessage('Please enter a property address or parcel ID to run an analysis.');
-      return;
-    }
-
-    // Clear previous results and show loading state
-    setPropertyResult(null);
-    setMessage('');
-    setIsLoading(true);
-
-    // --- FAKE API DELAY ---
-    // setTimeout simulates the time it takes to send a request over the internet.
-    // FUTURE AWS INTEGRATION POINT:
-    // Here we will eventually use `fetch('https://api-gateway-url...')` to call an AWS Lambda.
-    setTimeout(() => {
-      // For now we always return sample data to simulate a successful search result.
-      setPropertyResult({ ...samplePropertyData, query: trimmedInput });
-      setMessage(`Showing sample analysis results for: "${trimmedInput}"`);
-      setIsLoading(false);
-    }, 1500); // 1.5 seconds simulation
-  };
-
+// Draw the parcel's real GeoJSON geometry as an SVG (no map library required).
+function ParcelShape({ geometry }) {
+  if (!geometry || !geometry.coordinates) {
+    return <div className="map-placeholder"><p>No geometry available for this parcel.</p></div>;
+  }
+  const polys = geometry.type === 'MultiPolygon' ? geometry.coordinates : [geometry.coordinates];
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  polys.forEach((poly) =>
+    poly.forEach((ring) =>
+      ring.forEach(([x, y]) => {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      })
+    )
+  );
+  const w = maxX - minX || 1e-6;
+  const h = maxY - minY || 1e-6;
+  const VW = 360, VH = 300, pad = 16;
+  const scale = Math.min((VW - pad * 2) / w, (VH - pad * 2) / h);
+  const offX = (VW - w * scale) / 2;
+  const offY = (VH - h * scale) / 2;
+  // Flip Y so north points up (latitude grows upward, SVG y grows downward).
+  const project = ([x, y]) => [offX + (x - minX) * scale, VH - (offY + (y - minY) * scale)];
+  const paths = polys.map((poly) =>
+    poly
+      .map((ring) => 'M' + ring.map((pt) => project(pt).map((n) => n.toFixed(1)).join(',')).join(' L') + ' Z')
+      .join(' ')
+  );
+  const cLat = ((minY + maxY) / 2).toFixed(5);
+  const cLng = ((minX + maxX) / 2).toFixed(5);
   return (
-    <div className="app-shell">
-      {/* Header / Hero Section */}
-      <header className="hero-section">
-        <p className="hero-badge">AWS re/Start Portfolio Project</p>
-        <h1>Environmental Compliance Dashboard</h1>
-        <p className="hero-subtitle">
-          Evaluate property-level environmental risk indicators and compliance readiness for
-          development planning.
-        </p>
-      </header>
-
-      {/* Search Controls */}
-      <section className="search-section card">
-        <label htmlFor="propertySearch" className="search-label">
-          Property Address or Parcel ID
-        </label>
-        <form className="search-row" onSubmit={handleAnalyzeProperty}>
-          <input
-            id="propertySearch"
-            type="text"
-            placeholder="Example: 1458 Green Valley Rd or PARCEL-4821-AZ"
-            value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
-          />
-          <button type="submit" disabled={isLoading}>Analyze Property</button>
-        </form>
-        {message && <p className="search-message">{message}</p>}
-        {isLoading && <p className="loading-message">Fetching sample AWS-ready data...</p>}
-      </section>
-
-      {/* --- CONDITIONAL RENDERING --- */}
-      {/* The && means: "If propertyResult has data, then draw the main dashboard below." */}
-      {/* If propertyResult is null (before searching), nothing below is drawn. */}
-      {propertyResult && (
-        <main className="dashboard-tabs">
-          <div className="tabs">
-            <button onClick={() => setActiveTab('overview')}>Overview</button>
-            <button onClick={() => setActiveTab('risks')}>Risks</button>
-            <button onClick={() => setActiveTab('map')}>Map</button>
-            <button onClick={() => setActiveTab('recommendations')}>Recommendations</button>
-            <button onClick={() => setActiveTab('aws')}>AWS Plan</button>
-          </div>
-          {activeTab === 'overview' && (
-          <section className="card property-overview">
-            <h2>Property Overview</h2>
-            <p>
-              <strong>Search Query:</strong> {propertyResult.query}
-            </p>
-            <p>
-              <strong>Sample Address:</strong> {propertyResult.address}
-            </p>
-            <p>
-              <strong>Parcel ID:</strong> {propertyResult.id}
-            </p>
-            <p>
-              <strong>Last Updated:</strong> {propertyResult.updatedAt}
-            </p>
-            <p className="compliance-pill">
-              Overall Compliance Status: <span>{propertyResult.complianceStatus}</span>
-            </p>
-          </section>
-          )}
-          {activeTab === 'risks' && (
-          <section className="card risk-section">
-            <h2>Risk Summary</h2>
-            <div className="risk-grid">
-              {propertyResult.riskSummary.map((riskItem) => (
-                <article
-                  key={riskItem.label}
-                  className={`risk-card risk-${riskItem.status}`}
-                >
-                  <p className="risk-label">{riskItem.label}</p>
-                  <p className="risk-level">{riskItem.level}</p>
-                </article>
-              ))}
-            </div>
-          </section>
-          )}
-          {activeTab === 'map' && (
-          <section className="card map-section">
-            <h2>Map Preview (Placeholder)</h2>
-            <div className="map-placeholder">
-              <p>Interactive map will appear here.</p>
-              <p>Future integration: Amazon Location Service or Mapbox.</p>
-            </div>
-          </section>
-          )}
-          {activeTab === 'recommendations' && (
-          <section className="card recommendations-section">
-            <h2>Compliance Recommendations</h2>
-            <ul>
-              {propertyResult.recommendations.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          </section>
-          )}
-          {activeTab === 'aws' && (
-            <>
-          <section className="card aws-plan-section">
-            <h2>AWS Services Planned</h2>
-            <div className="aws-service-list">
-              {propertyResult.awsPlan.map((serviceItem) => (
-                <article key={serviceItem.service} className="aws-service-item">
-                  <h3>{serviceItem.service}</h3>
-                  <p>{serviceItem.purpose}</p>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="card integration-note">
-            <h2>Future AWS Integration</h2>
-            <p>
-              This frontend currently uses sample data for demonstration. In a production AWS
-              architecture, search requests will flow through API Gateway to Lambda, then retrieve
-              property intelligence from DynamoDB or RDS/PostGIS, with assets in S3 and observability
-              through CloudWatch.
-            </p>
-          </section>
-            </>
-          )}
-        </main>
-      )}
+    <div>
+      <svg
+        viewBox={`0 0 ${VW} ${VH}`}
+        style={{ width: '100%', maxWidth: VW, background: 'rgba(0,0,0,0.05)', borderRadius: 8 }}
+      >
+        {paths.map((d, i) => (
+          <path key={i} d={d} fill="rgba(56,142,60,0.35)" stroke="#2e7d32" strokeWidth="1.5" />
+        ))}
+      </svg>
+      <p style={{ fontSize: '0.85rem', opacity: 0.75, marginTop: 8 }}>
+        Actual parcel outline · center ≈ {cLat}, {cLng}
+      </p>
     </div>
   );
 }
 
-export default App;
+const TABS = [
+  ['overview', 'Overview'],
+  ['risks', 'Risks'],
+  ['map', 'Map'],
+  ['recommendations', 'Recommendations'],
+  ['aws', 'AWS Plan'],
+];
 
-import { useState } from 'react';
-import './App.css';
+const AWS_PLAN = [
+  { service: 'Amazon RDS (PostgreSQL + PostGIS)', purpose: 'Stores parcels, environmental layers, and the computed risk_analysis table.' },
+  { service: 'Elastic Beanstalk (Node / Express)', purpose: 'Hosts the API serving parcel search, detail, and risk summaries.' },
+  { service: 'Amazon S3 + CloudFront', purpose: 'Hosts and distributes the React/Vite production build.' },
+  { service: 'Amazon CloudWatch', purpose: 'Logs, metrics, and alerting across the stack.' },
+];
 
 function App() {
-  // --- STATE VARIABLES ---
-  // useState tells React to track these variables and redraw the screen if they change.
-  // 'searchInput' stores what the user is typing right now.
   const [searchInput, setSearchInput] = useState('');
-
-  // 'message' holds helpful alerts like "Please enter an address".
   const [message, setMessage] = useState('');
-
-  // 'propertyResult' holds the data we get back after searching. null means no search yet.
   const [propertyResult, setPropertyResult] = useState(null);
-
-  // 'isLoading' tells us if we are currently waiting for data to return.
   const [isLoading, setIsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('overview');
 
-  // --- FAKE SAMPLE DATA ---
-  // We use this fake data to build the UI before the backend is ready.
-  // Later, we will delete this and fetch real data from AWS.
-  const samplePropertyData = {
-    id: 'PARCEL-4821-AZ',
-    address: '1458 Green Valley Rd, Cedar Hill, TX',
-    updatedAt: 'May 13, 2026',
-    riskSummary: [
-      { label: 'Flood Zone', level: 'Moderate', status: 'warning' },
-      { label: 'Wetlands', level: 'Low', status: 'good' },
-      { label: 'Protected Habitat', level: 'High', status: 'danger' },
-      { label: 'Endangered Species', level: 'Moderate', status: 'warning' },
-    ],
-    complianceStatus: 'Conditional Approval',
-    recommendations: [
-      'Schedule an ecological impact review before site clearing.',
-      'Add stormwater runoff controls to lower flood-related risk.',
-      'Request a protected habitat buffer assessment from environmental consultants.',
-      'Maintain monitoring records for local compliance reporting.',
-    ],
-    awsPlan: [
-      {
-        service: 'Amazon API Gateway',
-        purpose: 'Secure endpoint for frontend property analysis requests.',
-      },
-      {
-        service: 'AWS Lambda',
-        purpose: 'Serverless function to process risk logic and combine data sources.',
-      },
-      {
-        service: 'Amazon DynamoDB / Amazon RDS (PostGIS)',
-        purpose: 'Store parcel records, risk results, and geospatial compliance metadata.',
-      },
-      {
-        service: 'Amazon S3',
-        purpose: 'Store map layers, uploaded reports, and compliance documents.',
-      },
-      {
-        service: 'Amazon CloudWatch',
-        purpose: 'Track logs, metrics, and alerting for the analysis workflow.',
-      },
-      {
-        service: 'Amazon Location Service / Mapbox (optional)',
-        purpose: 'Interactive map rendering and geocoding in future releases.',
-      },
-    ],
-  };
-
-  // --- FORM SUBMISSION HANDLER ---
-  // This runs when the user clicks "Analyze Property" or hits the Enter key.
-  const handleAnalyzeProperty = (event) => {
-    // Prevents the browser's default behavior of reloading the entire page when a form is submitted.
+  const handleAnalyzeProperty = async (event) => {
     event.preventDefault();
-    const trimmedInput = searchInput.trim();
-
-    if (!trimmedInput) {
+    const q = searchInput.trim();
+    if (!q) {
       setPropertyResult(null);
-      setMessage('Please enter a property address or parcel ID to run an analysis.');
+      setMessage('Please enter a parcel number, address, or owner name to run an analysis.');
       return;
     }
-
-    // Clear previous results and show loading state
     setPropertyResult(null);
     setMessage('');
     setIsLoading(true);
-
-    // --- FAKE API DELAY ---
-    // setTimeout simulates the time it takes to send a request over the internet.
-    // FUTURE AWS INTEGRATION POINT:
-    // Here we will eventually use `fetch('https://api-gateway-url...')` to call an AWS Lambda.
-    setTimeout(() => {
-      // For now we always return sample data to simulate a successful search result.
-      setPropertyResult({ ...samplePropertyData, query: trimmedInput });
-      setMessage(`Showing sample analysis results for: "${trimmedInput}"`);
+    try {
+      // 1) find a matching parcel
+      const sRes = await fetch(`${API}/api/parcels/search?q=${encodeURIComponent(q)}&limit=1`);
+      if (!sRes.ok) throw new Error(`search ${sRes.status}`);
+      const sData = await sRes.json();
+      const list = Array.isArray(sData)
+        ? sData
+        : sData.parcels || sData.results || sData.rows || sData.data || [];
+      if (!list.length) {
+        setMessage(`No parcel found matching "${q}".`);
+        setIsLoading(false);
+        return;
+      }
+      const pid = list[0].id ?? list[0].parcel_id ?? list[0].parcel_no;
+      // 2) pull full detail (attributes + geometry + risk)
+      const dRes = await fetch(`${API}/api/parcels/${encodeURIComponent(pid)}`);
+      if (!dRes.ok) throw new Error(`detail ${dRes.status}`);
+      const detail = await dRes.json();
+      setPropertyResult({ ...detail, query: q });
+      setActiveTab('overview');
+      setMessage(`Showing results for "${q}".`);
+    } catch (err) {
+      setMessage(`Couldn't reach the API (${err.message}). Is the server running on ${API}?`);
+    } finally {
       setIsLoading(false);
-    }, 1500); // 1.5 seconds simulation
+    }
   };
+
+  const p = propertyResult;
+  const attrs = (p && p.attributes) || {};
+  const riskCards = p
+    ? [
+        { label: 'Flood Zone', ...floodInfo(p.in_flood_zone, p.fema_zone) },
+        { label: 'Wetlands', level: p.in_wetland ? 'Present' : 'None detected', status: p.in_wetland ? 'danger' : 'good' },
+        { label: 'Protected Habitat', level: p.in_habitat ? 'Present' : 'None detected', status: p.in_habitat ? 'danger' : 'good' },
+        { label: 'Risk Score', level: String(p.risk_score), status: p.risk_score >= 60 ? 'danger' : p.risk_score >= 30 ? 'warning' : 'good' },
+      ]
+    : [];
 
   return (
     <div className="app-shell">
-      {/* Header / Hero Section */}
       <header className="hero-section">
         <p className="hero-badge">AWS re/Start Portfolio Project</p>
         <h1>Environmental Compliance Dashboard</h1>
         <p className="hero-subtitle">
-          Evaluate property-level environmental risk indicators and compliance readiness for
-          development planning.
+          Evaluate parcel-level environmental risk and compliance readiness across the NC Research Triangle.
         </p>
       </header>
 
-      {/* Search Controls */}
       <section className="search-section card">
         <label htmlFor="propertySearch" className="search-label">
-          Property Address or Parcel ID
+          Parcel Number, Address, or Owner
         </label>
         <form className="search-row" onSubmit={handleAnalyzeProperty}>
           <input
             id="propertySearch"
             type="text"
-            placeholder="Example: 1458 Green Valley Rd or PARCEL-4821-AZ"
+            placeholder="Example: 0844248583 or HAMLIN RD"
             value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
+            onChange={(e) => setSearchInput(e.target.value)}
           />
           <button type="submit" disabled={isLoading}>Analyze Property</button>
         </form>
         {message && <p className="search-message">{message}</p>}
-        {isLoading && <p className="loading-message">Fetching sample AWS-ready data...</p>}
+        {isLoading && <p className="loading-message">Querying the risk database…</p>}
       </section>
 
-      {/* --- CONDITIONAL RENDERING --- */}
-      {/* The && means: "If propertyResult has data, then draw the main dashboard below." */}
-      {/* If propertyResult is null (before searching), nothing below is drawn. */}
-      {propertyResult && (
+      {p && (
         <main className="dashboard-grid">
-          <section className="card property-overview">
-            <h2>Property Overview</h2>
-            <p>
-              <strong>Search Query:</strong> {propertyResult.query}
-            </p>
-            <p>
-              <strong>Sample Address:</strong> {propertyResult.address}
-            </p>
-            <p>
-              <strong>Parcel ID:</strong> {propertyResult.id}
-            </p>
-            <p>
-              <strong>Last Updated:</strong> {propertyResult.updatedAt}
-            </p>
-            <p className="compliance-pill">
-              Overall Compliance Status: <span>{propertyResult.complianceStatus}</span>
-            </p>
-          </section>
+          <div className="tabs">
+            {TABS.map(([key, label]) => (
+              <button
+                key={key}
+                className={activeTab === key ? 'active' : ''}
+                onClick={() => setActiveTab(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
 
-          <section className="card risk-section">
-            <h2>Risk Summary</h2>
-            <div className="risk-grid">
-              {propertyResult.riskSummary.map((riskItem) => (
-                <article
-                  key={riskItem.label}
-                  className={`risk-card risk-${riskItem.status}`}
-                >
-                  <p className="risk-label">{riskItem.label}</p>
-                  <p className="risk-level">{riskItem.level}</p>
-                </article>
-              ))}
-            </div>
-          </section>
+          {activeTab === 'overview' && (
+            <section className="card property-overview">
+              <h2>Property Overview</h2>
+              <p><strong>Parcel #:</strong> {val(p.parcel_no)}</p>
+              <p><strong>Address:</strong> {val(attrs.SITEADD)}{attrs.SCITY ? `, ${attrs.SCITY}` : ''} {val(attrs.SZIP)}</p>
+              <p><strong>Owner:</strong> {val(attrs.OWNNAME)}</p>
+              <p><strong>County:</strong> {val(p.county_name)}</p>
+              <p><strong>Acreage:</strong> {val(attrs.GISACRES)}</p>
+              <p><strong>Land Use:</strong> {val(attrs.PARUSEDESC)}</p>
+              <p><strong>Assessed Value:</strong> {attrs.PARVAL && attrs.PARVAL !== 'nan' ? `$${Number(attrs.PARVAL).toLocaleString()}` : '—'}</p>
+              <p className="compliance-pill">
+                Compliance Status: <span>{prettyStatus(p.compliance_status)}</span>
+              </p>
+            </section>
+          )}
 
-          <section className="card map-section">
-            <h2>Map Preview (Placeholder)</h2>
-            <div className="map-placeholder">
-              <p>Interactive map will appear here.</p>
-              <p>Future integration: Amazon Location Service or Mapbox.</p>
-            </div>
-          </section>
+          {activeTab === 'risks' && (
+            <section className="card risk-section">
+              <h2>Risk Summary</h2>
+              <div className="risk-grid">
+                {riskCards.map((r) => (
+                  <article key={r.label} className={`risk-card risk-${r.status}`}>
+                    <p className="risk-label">{r.label}</p>
+                    <p className="risk-level">{r.level}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
 
-          <section className="card recommendations-section">
-            <h2>Compliance Recommendations</h2>
-            <ul>
-              {propertyResult.recommendations.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          </section>
+          {activeTab === 'map' && (
+            <section className="card map-section">
+              <h2>Parcel Map</h2>
+              <ParcelShape geometry={p.geometry} />
+            </section>
+          )}
 
-          <section className="card aws-plan-section">
-            <h2>AWS Services Planned</h2>
-            <div className="aws-service-list">
-              {propertyResult.awsPlan.map((serviceItem) => (
-                <article key={serviceItem.service} className="aws-service-item">
-                  <h3>{serviceItem.service}</h3>
-                  <p>{serviceItem.purpose}</p>
-                </article>
-              ))}
-            </div>
-          </section>
+          {activeTab === 'recommendations' && (
+            <section className="card recommendations-section">
+              <h2>Compliance Recommendations</h2>
+              <ul>
+                {buildRecommendations(p).map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </section>
+          )}
 
-          <section className="card integration-note">
-            <h2>Future AWS Integration</h2>
-            <p>
-              This frontend currently uses sample data for demonstration. In a production AWS
-              architecture, search requests will flow through API Gateway to Lambda, then retrieve
-              property intelligence from DynamoDB or RDS/PostGIS, with assets in S3 and observability
-              through CloudWatch.
-            </p>
-          </section>
+          {activeTab === 'aws' && (
+            <section className="card aws-plan-section">
+              <h2>AWS Architecture</h2>
+              <div className="aws-service-list">
+                {AWS_PLAN.map((s) => (
+                  <article key={s.service} className="aws-service-item">
+                    <h3>{s.service}</h3>
+                    <p>{s.purpose}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
         </main>
       )}
     </div>
